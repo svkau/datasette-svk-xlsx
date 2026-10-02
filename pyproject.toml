@@ -1,0 +1,16 @@
+[project]
+name = "datasette-xlsx"
+version = "0.1.0"
+description = "Exportera tabeller och frågeresultat från Datasette som Excel (.xlsx)"
+requires-python = ">=3.9"
+dependencies = ["datasette>=0.64", "openpyxl>=3.1"]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio"]
+
+[project.entry-points.datasette]
+xlsx = "datasette_xlsx"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
