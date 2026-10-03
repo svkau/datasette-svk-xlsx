@@ -20,6 +20,9 @@ Datat i varje blad formateras som en Excel-tabell (filter, randade rader).
 Kolumnnamn som Excel inte godtar som tabellrubriker (tomma eller dubbletter)
 görs om, t.ex. id, id → id, id_2.
 
+Kolumnbredder beräknas från rubrikerna och de första 1000 raderna (xlsx
+saknar automatisk anpassning vid öppning), med tak på 60 tecken.
+
 Konfiguration (metadata/datasette.yaml):
 
     plugins:
@@ -48,6 +51,10 @@ EXCEL_MAX_ROWS = 1_048_576  # inkl. rubrikrad
 EXCEL_MAX_CELL = 32_767
 EXCEL_MAX_INT = 10**15  # Excel lagrar tal som double, ~15 siffrors precision
 TABLE_STYLE = "TableStyleMedium2"
+WIDTH_SAMPLE_ROWS = 1000  # rader som kolumnbredden beräknas från
+MIN_WIDTH = 6
+MAX_WIDTH = 60
+FILTER_BUTTON_WIDTH = 3  # plats för tabellens filterknapp i rubriken
 
 
 @hookimpl
@@ -74,9 +81,12 @@ class _Writer:
         self.hit_limit = False
         self.ws = None
         self.table = None
+        self.widths = None  # beräknas från de första raderna i första bladet
+        self.buffer = None
         self._new_sheet()
 
     def _new_sheet(self):
+        self._flush()
         self._close_table()
         self.sheets += 1
         title = self.base_title if self.sheets == 1 else _sheet_title(
@@ -84,8 +94,13 @@ class _Writer:
         )
         self.ws = self.wb.create_sheet(title)
         self.ws.freeze_panes = "A2"
-        self.ws.append([self._cell(h) for h in self.headers])
         self.sheet_rows = 1
+        if self.widths is None:
+            # Kolumnbredder måste sättas innan första raden skrivs, så rader
+            # buffras tills underlaget räcker (se _flush).
+            self.buffer = []
+        else:
+            self._start_sheet()
         if self.headers:
             self.table = Table(
                 displayName=_table_name(self.base_title, self.sheets),
@@ -101,6 +116,21 @@ class _Writer:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 self.ws.add_table(self.table)
+
+    def _start_sheet(self):
+        """Sätt kolumnbredder och skriv rubrikraden i aktuellt blad."""
+        _set_widths(self.ws, self.widths)
+        self.ws.append([self._cell(h) for h in self.headers])
+
+    def _flush(self):
+        """Beräkna kolumnbredder från buffrade rader och skriv ut dem."""
+        if self.buffer is None:
+            return
+        self.widths = _column_widths(self.headers, self.buffer)
+        self._start_sheet()
+        for row in self.buffer:
+            self.ws.append([self._cell(v) for v in row])
+        self.buffer = None
 
     def _close_table(self):
         """Sätt slutligt område för aktuellt blads Excel-tabell."""
@@ -148,12 +178,18 @@ class _Writer:
             return False
         if self.sheet_rows >= EXCEL_MAX_ROWS:
             self._new_sheet()
-        self.ws.append([self._cell(v) for v in row])
+        if self.buffer is not None:
+            self.buffer.append(list(row))
+            if len(self.buffer) >= WIDTH_SAMPLE_ROWS:
+                self._flush()
+        else:
+            self.ws.append([self._cell(v) for v in row])
         self.rows += 1
         self.sheet_rows += 1
         return True
 
     def finish(self, info):
+        self._flush()
         self._close_table()
         ws = self.wb.create_sheet("Om uttaget")
         info = dict(info)
@@ -165,9 +201,10 @@ class _Writer:
             info["Trunkerade celler"] = (
                 f"{self.truncated_cells} (Excel tillåter max {EXCEL_MAX_CELL} tecken per cell)"
             )
-        for k, v in info.items():
-            if v not in (None, ""):
-                ws.append([k, self._cell(v)])
+        info = [(k, v) for k, v in info.items() if v not in (None, "")]
+        _set_widths(ws, _column_widths(["", ""], info, max_width=100))
+        for k, v in info:
+            ws.append([k, self._cell(v)])
         with tempfile.TemporaryFile() as fp:
             self.wb.save(fp)
             fp.seek(0)
@@ -177,6 +214,38 @@ class _Writer:
 def _sheet_title(name):
     name = re.sub(r"[\[\]:*?/\\]", "_", name or "Resultat").strip("'") or "Resultat"
     return name[:31]
+
+
+def _text_width(value):
+    """Ungefärlig visningsbredd i tecken för ett cellvärde."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return 5
+    if isinstance(value, (int, float)):
+        # Formatet Allmänt visar högst 11 tecken innan Excel byter till
+        # exponentform; större heltal skrivs som text av _cell.
+        text = str(value)
+        return len(text) if abs(value) >= EXCEL_MAX_INT else min(len(text), 11)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(f"<binärdata, {len(value)} byte>")
+    if isinstance(value, dict) and "value" in value:
+        return _text_width(value.get("label") or value.get("value"))
+    return max(len(line) for line in str(value).splitlines() or [""])
+
+
+def _column_widths(headers, rows, max_width=MAX_WIDTH):
+    """Kolumnbredder utifrån rubriker och ett urval rader."""
+    widths = [len(h) + FILTER_BUTTON_WIDTH if h else 0 for h in headers]
+    for row in rows:
+        for i, value in enumerate(row[: len(widths)]):
+            widths[i] = max(widths[i], _text_width(value))
+    return [min(max(w + 1, MIN_WIDTH), max_width) for w in widths]
+
+
+def _set_widths(ws, widths):
+    for i, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
 
 
 def _table_headers(columns):
