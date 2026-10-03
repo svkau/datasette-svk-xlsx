@@ -1,9 +1,12 @@
 import io
 import sqlite3
+import urllib.parse
 
 import pytest
 from datasette.app import Datasette
 from openpyxl import load_workbook
+
+import datasette_xlsx
 
 
 @pytest.fixture
@@ -94,3 +97,52 @@ async def test_permissions_forwarded(tmp_path):
     resp = await ds.client.get("/p/t.xlsx", cookies=cookies)
     wb, ws = sheet(resp)
     assert ws.max_row == 1501
+
+
+def table_of(ws):
+    """Bladets enda Excel-tabell; kontrollerar att rubrikerna matchar."""
+    assert len(ws.tables) == 1
+    table = list(ws.tables.values())[0]
+    header_cells = [c.value for c in ws[1]]
+    assert table.column_names == header_cells
+    assert table.autoFilter.ref == table.ref
+    return table
+
+
+@pytest.mark.asyncio
+async def test_excel_table(ds):
+    wb, ws = sheet(await ds.client.get("/test/personer.xlsx"))
+    table = table_of(ws)
+    assert table.displayName == "tbl_personer"
+    assert table.ref == "A1:D2501"
+    assert table.tableStyleInfo.name == "TableStyleMedium2"
+    assert not wb["Om uttaget"].tables
+
+
+@pytest.mark.asyncio
+async def test_excel_table_invalid_headers(ds):
+    sql = 'select id, namn as ID, 1 as "", 2 as "a\nb" from personer limit 3'
+    wb, ws = sheet(await ds.client.get(
+        "/test.xlsx?" + urllib.parse.urlencode({"sql": sql})))
+    table = table_of(ws)
+    assert table.column_names == ["id", "ID_2", "Kolumn3", "a b"]
+    assert table.displayName == "tbl_test_fraga"
+    assert table.ref == "A1:D4"
+
+
+@pytest.mark.asyncio
+async def test_excel_table_empty_result(ds):
+    wb, ws = sheet(await ds.client.get("/test/personer.xlsx?id__gt=99999"))
+    assert ws.max_row == 1
+    assert table_of(ws).ref == "A1:D2"
+
+
+@pytest.mark.asyncio
+async def test_excel_table_per_sheet(ds, monkeypatch):
+    monkeypatch.setattr(datasette_xlsx, "EXCEL_MAX_ROWS", 1000)
+    wb, ws = sheet(await ds.client.get("/test/personer.xlsx"))
+    data_sheets = [s for s in wb.worksheets if s.title != "Om uttaget"]
+    tables = [table_of(s) for s in data_sheets]
+    assert [t.displayName for t in tables] == [
+        "tbl_personer", "tbl_personer_2", "tbl_personer_3"]
+    assert [t.ref for t in tables] == ["A1:D1000", "A1:D1000", "A1:D503"]

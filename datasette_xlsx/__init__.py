@@ -16,6 +16,10 @@ Hela resultatet hämtas, oberoende av sidindelning:
   vid max_returned_rows. Här körs frågan om direkt mot en läsanslutning
   (skrivskyddad) och rader strömmas in i arbetsboken.
 
+Datat i varje blad formateras som en Excel-tabell (filter, randade rader).
+Kolumnnamn som Excel inte godtar som tabellrubriker (tomma eller dubbletter)
+görs om, t.ex. id, id → id, id_2.
+
 Konfiguration (metadata/datasette.yaml):
 
     plugins:
@@ -27,18 +31,23 @@ import datetime
 import re
 import tempfile
 import urllib.parse
+import warnings
 
 from datasette import hookimpl
 from datasette.utils import sqlite_timelimit
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.filters import AutoFilter
+from openpyxl.worksheet.table import Table, TableColumn, TableStyleInfo
 
 PLUGIN = "datasette-xlsx"
 CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 EXCEL_MAX_ROWS = 1_048_576  # inkl. rubrikrad
 EXCEL_MAX_CELL = 32_767
 EXCEL_MAX_INT = 10**15  # Excel lagrar tal som double, ~15 siffrors precision
+TABLE_STYLE = "TableStyleMedium2"
 
 
 @hookimpl
@@ -56,6 +65,7 @@ class _Writer:
     def __init__(self, columns, sheet_title, max_rows):
         self.wb = Workbook(write_only=True)
         self.columns = list(columns)
+        self.headers = _table_headers(self.columns)
         self.base_title = _sheet_title(sheet_title)
         self.max_rows = max_rows
         self.rows = 0
@@ -63,17 +73,44 @@ class _Writer:
         self.truncated_cells = 0
         self.hit_limit = False
         self.ws = None
+        self.table = None
         self._new_sheet()
 
     def _new_sheet(self):
+        self._close_table()
         self.sheets += 1
         title = self.base_title if self.sheets == 1 else _sheet_title(
             f"{self.base_title[:25]} ({self.sheets})"
         )
         self.ws = self.wb.create_sheet(title)
         self.ws.freeze_panes = "A2"
-        self.ws.append([self._cell(c) for c in self.columns])
+        self.ws.append([self._cell(h) for h in self.headers])
         self.sheet_rows = 1
+        if self.headers:
+            self.table = Table(
+                displayName=_table_name(self.base_title, self.sheets),
+                ref="A1:A2",  # sätts slutligt i _close_table
+                autoFilter=AutoFilter(ref="A1:A2"),
+                tableStyleInfo=TableStyleInfo(name=TABLE_STYLE, showRowStripes=True),
+            )
+            # I write-only-läge kan openpyxl inte läsa rubrikerna ur bladet,
+            # så kolumnerna anges explicit och måste matcha rubrikcellerna.
+            self.table.tableColumns = [
+                TableColumn(id=i, name=h) for i, h in enumerate(self.headers, 1)
+            ]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.ws.add_table(self.table)
+
+    def _close_table(self):
+        """Sätt slutligt område för aktuellt blads Excel-tabell."""
+        if self.table is None:
+            return
+        # En tabell måste ha minst en datarad; vid tomt resultat blir den tom.
+        last_row = max(self.sheet_rows, 2)
+        self.table.ref = f"A1:{get_column_letter(len(self.headers))}{last_row}"
+        self.table.autoFilter.ref = self.table.ref
+        self.table = None
 
     def _cell(self, value):
         if value is None:
@@ -117,6 +154,7 @@ class _Writer:
         return True
 
     def finish(self, info):
+        self._close_table()
         ws = self.wb.create_sheet("Om uttaget")
         info = dict(info)
         info["Antal rader"] = self.rows
@@ -139,6 +177,31 @@ class _Writer:
 def _sheet_title(name):
     name = re.sub(r"[\[\]:*?/\\]", "_", name or "Resultat").strip("'") or "Resultat"
     return name[:31]
+
+
+def _table_headers(columns):
+    """Gör kolumnnamn giltiga som rubriker i en Excel-tabell.
+
+    Excel kräver icke-tomma rubriker som är unika utan hänsyn till
+    versaler/gemener, t.ex. blir ``select a.id, b.id`` rubrikerna id, id_2.
+    """
+    headers, seen = [], set()
+    for i, col in enumerate(columns, 1):
+        name = ILLEGAL_CHARACTERS_RE.sub("", str(col))
+        name = re.sub(r"\s+", " ", name).strip()[:255] or f"Kolumn{i}"
+        candidate, n = name, 1
+        while candidate.casefold() in seen:
+            n += 1
+            candidate = f"{name}_{n}"
+        seen.add(candidate.casefold())
+        headers.append(candidate)
+    return headers
+
+
+def _table_name(base, sheet_number):
+    """Giltigt och unikt namn för Excel-tabellen, t.ex. tbl_personer_2."""
+    name = "tbl_" + re.sub(r"[^\w.]", "_", base)[:200]
+    return name if sheet_number == 1 else f"{name}_{sheet_number}"
 
 
 def _filename_header(name):
