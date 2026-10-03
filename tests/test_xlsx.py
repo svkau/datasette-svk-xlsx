@@ -156,9 +156,9 @@ def widths(ws):
 async def test_column_widths(ds):
     wb, ws = sheet(await ds.client.get("/test/personer.xlsx"))
     # id: rubrik + filterknapp, namn: "Person 999" (bara de första 1000
-    # raderna ingår i beräkningen), nr: Allmänt visar
-    # max 11 tecken, f: minimibredd
-    assert widths(ws) == {"A": 6, "B": 11, "C": 12, "D": 6}
+    # raderna ingår i beräkningen), nr: 12 siffror visas fullt ut,
+    # f: minimibredd
+    assert widths(ws) == {"A": 6, "B": 11, "C": 13, "D": 6}
     # Raderna kommer i rätt ordning även efter bufferten för breddberäkning
     assert [ws.cell(r, 1).value for r in range(1000, 1004)] == [999, 1000, 1001, 1002]
     assert widths(wb["Om uttaget"])["A"] > 6
@@ -180,3 +180,16 @@ async def test_column_widths_every_sheet(ds, monkeypatch):
     assert len(data_sheets) == 5
     assert all(widths(s) == widths(ws) for s in data_sheets)
     assert sum(s.max_row - 1 for s in data_sheets) == 2500
+
+
+@pytest.mark.asyncio
+async def test_large_integers_shown_in_full(ds):
+    """Heltal över 11 tecken visas annars i exponentform (1,99001E+11)."""
+    sql = ("select 199001011234 as pnr, -12345678901 as neg, "
+           "12345678901 as elva, 1.5 as flyt")
+    wb, ws = sheet(await ds.client.get(
+        "/test.xlsx?" + urllib.parse.urlencode({"sql": sql})))
+    assert ws["A2"].value == 199001011234 and ws["A2"].number_format == "0"
+    assert ws["B2"].value == -12345678901 and ws["B2"].number_format == "0"
+    assert ws["C2"].number_format == "General"
+    assert ws["D2"].number_format == "General"

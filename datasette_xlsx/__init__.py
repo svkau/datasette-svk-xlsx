@@ -50,6 +50,7 @@ CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.shee
 EXCEL_MAX_ROWS = 1_048_576  # inkl. rubrikrad
 EXCEL_MAX_CELL = 32_767
 EXCEL_MAX_INT = 10**15  # Excel lagrar tal som double, ~15 siffrors precision
+GENERAL_MAX_CHARS = 11  # längre tal visas i exponentform med formatet Allmänt
 TABLE_STYLE = "TableStyleMedium2"
 WIDTH_SAMPLE_ROWS = 1000  # rader som kolumnbredden beräknas från
 MIN_WIDTH = 6
@@ -150,6 +151,12 @@ class _Writer:
         if isinstance(value, int):
             if abs(value) >= EXCEL_MAX_INT:
                 value = str(value)  # bevara exakta siffror
+            elif len(str(value)) > GENERAL_MAX_CHARS:
+                # T.ex. personnummer 199001011234: visa alla siffror i
+                # stället för 1,99001E+11, men behåll värdet som tal.
+                cell = WriteOnlyCell(self.ws, value=value)
+                cell.number_format = "0"
+                return cell
             else:
                 return value
         elif isinstance(value, float):
@@ -222,11 +229,10 @@ def _text_width(value):
         return 0
     if isinstance(value, bool):
         return 5
-    if isinstance(value, (int, float)):
-        # Formatet Allmänt visar högst 11 tecken innan Excel byter till
-        # exponentform; större heltal skrivs som text av _cell.
-        text = str(value)
-        return len(text) if abs(value) >= EXCEL_MAX_INT else min(len(text), 11)
+    if isinstance(value, int):
+        return len(str(value))  # stora heltal visas fullt ut, se _cell
+    if isinstance(value, float):
+        return min(len(str(value)), GENERAL_MAX_CHARS)
     if isinstance(value, (bytes, bytearray, memoryview)):
         return len(f"<binärdata, {len(value)} byte>")
     if isinstance(value, dict) and "value" in value:
