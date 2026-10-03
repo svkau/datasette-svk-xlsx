@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Miljöer
+.venv/
+
+# IDE
+.idea/
+
+# Testdatabaser hör inte hemma i repot
+*.db
+*.sqlite
+*.sqlite3
